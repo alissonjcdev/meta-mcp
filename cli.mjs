@@ -35,22 +35,53 @@ const fail = (m) => {
 
 // ---------- entrada de texto ----------
 
+// Uma única interface para a sessão toda: com entrada colada de uma vez (pipe),
+// cada linha vai para a pergunta certa, em ordem.
+let rl = null;
+let muted = false;
+const pending = [];
+const waiting = [];
+
+function input() {
+  if (rl) return rl;
+  const tty = Boolean(process.stdin.isTTY);
+  rl = createInterface({ input: process.stdin, output: process.stdout, terminal: tty });
+  const write = rl._writeToOutput.bind(rl);
+  rl._writeToOutput = (s) => {
+    // Durante uma pergunta oculta, troca o que a pessoa cola por asteriscos.
+    if (!muted) return write(s);
+    if (s.includes("\n") || s.includes("\r")) return write("\n");
+    write("*".repeat(s.length));
+  };
+  rl.on("line", (line) => {
+    const next = waiting.shift();
+    if (next) next(line);
+    else pending.push(line);
+  });
+  rl.on("close", () => {
+    while (waiting.length) waiting.shift()("");
+  });
+  return rl;
+}
+
+export function closeInput() {
+  if (rl) rl.close();
+  rl = null;
+}
+
 function ask(question, { hidden = false } = {}) {
+  const r = input();
+  muted = false;
+  process.stdout.write(question);
+  if (hidden && process.stdin.isTTY) muted = true;
   return new Promise((done) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    if (hidden) {
-      rl._writeToOutput = (s) => {
-        // Mostra a pergunta, mas troca o que a pessoa cola por asteriscos.
-        if (s.startsWith(question)) rl.output.write(question);
-        else if (s.includes("\n") || s.includes("\r")) rl.output.write("\n");
-        else rl.output.write("*".repeat(s.length));
-      };
-    }
-    rl.question(question, (answer) => {
-      rl.close();
-      if (hidden) process.stdout.write("\n");
-      done(answer.trim());
-    });
+    const finish = (answer) => {
+      muted = false;
+      done(String(answer).trim());
+    };
+    if (pending.length) finish(pending.shift());
+    else waiting.push(finish);
+    r.resume();
   });
 }
 
@@ -262,8 +293,13 @@ if (isMain) {
   if (flag("help") || flag("h") || cmd === "help") help();
   // Pessoa abriu no terminal sem comando: mostra a ajuda. O Claude abre sem terminal: vira servidor.
   else if (!cmd && process.stdin.isTTY) help();
-  else if (cmd === "setup") await setup();
-  else if (cmd === "renew") await renew();
+  else if (cmd === "setup") {
+    await setup();
+    closeInput();
+  } else if (cmd === "renew") {
+    await renew();
+    closeInput();
+  }
   else if (cmd === "check") await check();
   else if (!cmd || cmd === "server") await import("./server.mjs");
   else {
